@@ -54,6 +54,8 @@ flowchart LR
     Publisher --> Webhook["Webhook - HMAC signed"]
 
     API --> Metrics["Actuator & Micrometer"]
+```
+
 ---
 
 ## Transfer Flow
