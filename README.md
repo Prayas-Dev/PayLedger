@@ -1,114 +1,229 @@
-# Spring Payments Platform
+# PayLedger — Digital Wallet & Payment Ledger
 
-An auditable payments reference implementation built to demonstrate the engineering decisions behind a reliable banking service: atomic balance changes, immutable double-entry records, replay-safe APIs, secure integration events, and operational visibility.
-
-> This is a portfolio reference system, not a licensed banking product. It deliberately keeps the business surface small so the reliability mechanisms remain easy to inspect.
-
-[![CI](https://github.com/asim-altayb/spring-payments-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/asim-altayb/spring-payments-platform/actions/workflows/ci.yml)
+[![CI](https://github.com/Prayas-Dev/PayLedger/actions/workflows/ci.yml/badge.svg)](https://github.com/Prayas-Dev/PayLedger/actions/workflows/ci.yml)
 [![Java 17](https://img.shields.io/badge/Java-17-007396)](https://adoptium.net/)
-[![Spring Boot 4.1](https://img.shields.io/badge/Spring_Boot-4.1-6DB33F)](https://spring.io/projects/spring-boot)
+[![Spring Boot 4.1](https://img.shields.io/badge/Spring%20Boot-4.1-6DB33F)](https://spring.io/projects/spring-boot)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)](https://www.postgresql.org/)
+[![Maven](https://img.shields.io/badge/Build-Maven-C71A36)](https://maven.apache.org/)
+[![License: Apache‑2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-## Why this project exists
+---
 
-Payment code is not impressive because it has a `POST` endpoint. It is impressive when retries do not duplicate money movement, concurrent writes cannot silently corrupt balances, every transfer leaves a balanced audit trail, and downstream delivery can recover independently after a crash.
+## Overview
+PayLedger is a **backend‑only** service that provides a reliable digital‑wallet and payment‑ledger API.  It solves the classic engineering challenges of financial systems:
+- **Idempotent payment requests** – duplicate client retries never move money twice.
+- **Concurrent balance updates** – optimistic locking prevents lost updates.
+- **Immutable double‑entry ledger** – every transfer leaves a balanced audit trail.
+- **Reliable downstream integration** – a transactional outbox guarantees at‑least‑once event delivery.
+- **Secure API** – JWT‑based authentication with scope‑restricted authorization.
 
-This repository makes those properties explicit and testable.
+The implementation is deliberately small enough to be inspected in full while still demonstrating production‑grade patterns.
 
-## Production signals
+---
 
-| Concern | Implementation |
+## Core Features
+| Feature | Implementation |
 |---|---|
-| Atomic money movement | Spring transaction covers transfer, both account balances, ledger entries, and outbox event |
-| Double-entry invariant | Exactly one debit and one credit per transfer, reinforced by database constraints |
-| Replay safety | Client-scoped idempotency key with a unique database constraint |
-| Concurrent writes | JPA optimistic versioning; caller can retry with the same idempotency key |
-| Auditability | Append-only ledger protected from update/delete by a PostgreSQL trigger |
-| Reliable integration | Transactional outbox with `FOR UPDATE SKIP LOCKED` batch claims |
-| Webhook integrity | HMAC-SHA256 signatures using a rotatable external secret |
-| API security | JWT resource server plus scope-based method authorization |
-| Operations | Health probes, Prometheus metrics, structured logs, graceful shutdown |
-| Schema ownership | Versioned Flyway migrations; Hibernate validates rather than creates schema |
+| Wallet / Accounts | `Account` aggregate with versioned balances (`@Version`) persisted in PostgreSQL |
+| Money Transfers | `TransferService` executes debits/credits in a single `@Transactional` method |
+| Double‑Entry Ledger | `LedgerEntry` entity stores immutable debit and credit rows per transfer |
+| Idempotency | `idempotencyKey` column with unique `(client_id, idempotency_key)` constraint |
+| Concurrency Control | Optimistic locking (`ObjectOptimisticLockingFailureException`) on `Account` version |
+| Authentication & Authorization | Spring Security Resource Server, JWT, scope‑based `@PreAuthorize` checks |
+| Immutable Ledger | Ledger rows are never updated or deleted (only inserts) |
+| Transactional Outbox | `OutboxEvent` persisted in same transaction, processed by a lock‑skipping publisher |
+| Webhooks | HMAC‑SHA256 signed events emitted via the outbox publisher |
+| Database Migrations | Flyway scripts version the schema and enforce constraints |
+| Observability | Spring Boot Actuator + Micrometer Prometheus metrics |
+
+---
 
 ## Architecture
-
 ```mermaid
 flowchart LR
-  C[Mobile / partner client] -->|JWT + idempotency key| API[Spring MVC API]
-  API --> S[Transfer application service]
-  S -->|one transaction| DB[(PostgreSQL)]
-  DB --- A[Versioned accounts]
-  DB --- L[Immutable ledger]
-  DB --- T[Transfers]
-  DB --- O[Transactional outbox]
-  O --> W[Skip-locked publisher]
-  W -->|HMAC signed event| E[External bank / webhook adapter]
-  API --> M[Actuator + Micrometer]
+  Client[Client] -->|JWT + Idempotency‑Key| API[REST API]
+  API --> Service[Application / Service Layer]
+  Service --> DB[(PostgreSQL)]
+  DB --> Accounts[Versioned Accounts]
+  DB --> Ledger[Immutable Ledger]
+  DB --> Transfers[Transfer Records]
+  DB --> Outbox[Transactional Outbox]
+  Outbox --> Publisher[Outbox Publisher]
+  Publisher --> Webhook[Webhook (HMAC signed)]
+  API --> Metrics[Actuator & Micrometer]
 ```
 
-The detailed boundaries and failure behavior are documented in [Architecture](docs/architecture.md), [Threat model](docs/threat-model.md), and [Operations runbook](docs/runbook.md). Decisions are captured as ADRs instead of being hidden in implementation folklore.
+The diagram shows the major components used by PayLedger.  All state changes occur inside a single database transaction, ensuring atomicity.
 
-## Run locally
+---
 
-Requirements: Java 17+, Maven 3.6.3+, and Docker Compose.
+## Transfer Flow
+1. **Authentication** – The request carries a JWT; Spring Security validates it and extracts scopes.
+2. **Request validation** – `TransferController` validates the JSON payload (`@Valid`).
+3. **Idempotency check** – `TransferService` looks for an existing transfer with the same `(clientId, idempotencyKey)`.
+4. **Account lookup & currency match** – Source and destination accounts are loaded; mismatched currencies reject the request.
+5. **Balance validation** – `Account.debit` throws if the source balance would become negative.
+6. **Transactional processing** – Inside `@Transactional`:
+   - Debit source, credit destination (materialized balances).
+   - Persist a `Transfer` record.
+   - Insert two `LedgerEntry` rows (debit & credit).
+   - Create an `OutboxEvent` for the completed transfer.
+7. **Commit** – The transaction commits atomically; any optimistic‑lock or constraint violation rolls back and is reported as a domain error.
+8. **Response** – The newly created transfer DTO is returned (or the existing one for a retry).
 
+---
+
+## Double‑Entry Ledger
+Each transfer creates **two** immutable ledger rows:
+- **Debit** – Decreases the source account balance.
+- **Credit** – Increases the destination account balance.
+
+The ledger is never mutated; it provides an immutable audit trail that can be reconciled against the materialized balances.
+
+**Example** – Transfer ₹1,000 from **Account A** to **Account B**:
+| Entry | Account | Direction | Amount |
+|---|---|---|---|
+| 1 | A | DEBIT | 1,000 |
+| 2 | B | CREDIT | 1,000 |
+
+The sum of debit amounts always equals the sum of credit amounts, enforcing accounting integrity at the database level.
+
+---
+
+## Idempotency
+Clients include an `Idempotency-Key` header.  The service stores `(client_id, idempotency_key)` as a unique constraint in the `transfer` table.  A second request with the same key returns the already‑persisted `Transfer` without performing any balance updates, protecting against network retries.
+
+---
+
+## Concurrency & Consistency
+- **ACID transactions** – `@Transactional(isolation = READ_COMMITTED)` guarantees atomic writes.
+- **Optimistic locking** – `Account` entities carry a `@Version` column; concurrent updates raise `ObjectOptimisticLockingFailureException` which the service translates into a retry‑safe domain error.
+- **Isolation** – `READ_COMMITTED` prevents dirty reads while allowing high throughput.
+
+---
+
+## Security
+- **Spring Security** – Configured as a JWT resource server.
+- **Scopes** – Endpoints are protected with `@PreAuthorize("hasAuthority('SCOPE_...')")` (e.g., `accounts:read`, `transfers:write`).
+- **JWT secret** – Symmetric HS256 secret supplied via `JWT_SECRET` environment variable.
+- **Webhook signing** – Outbox events are signed with an HMAC secret (`WEBHOOK_SECRET`).
+
+---
+
+## Transactional Outbox
+The `OutboxEvent` entity is written in the same transaction that updates balances and the ledger.  A background publisher claims pending rows with `FOR UPDATE SKIP LOCKED`, publishes the event (e.g., to a webhook), and marks the row as dispatched.  This guarantees that no event is lost even if the application crashes after the business transaction commits.
+
+---
+
+## Database Design
+- **PostgreSQL** – Primary data store.
+- **JPA / Hibernate** – Object‑relational mapping.
+- **Flyway** – Versioned migration scripts (`src/main/resources/db/migration`).
+- **Key tables**:
+  - `accounts` – versioned aggregate with `balance` and `currency`.
+  - `transfers` – idempotent transfer record.
+  - `ledger_entry` – immutable debit/credit rows.
+  - `outbox_event` – pending integration events.
+- **Constraints** – unique `(client_id, idempotency_key)`, foreign keys, and a trigger that prevents updates/deletes on `ledger_entry`.
+
+---
+
+## API Overview
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/accounts` | Create a new account (scope: `accounts:write`). |
+| `GET`  | `/api/v1/accounts/{id}` | Retrieve account details (scope: `accounts:read`). |
+| `POST` | `/api/v1/transfers` | Create a transfer – idempotent (scope: `transfers:write`). |
+
+The OpenAPI specification is available at `src/main/resources/static/openapi.yaml` and can be viewed at `http://localhost:8080/v3/api-docs` when the application runs.
+
+---
+
+## Testing
+- **JUnit 5** – Unit and integration tests.
+- **Spring Test** – `@SpringBootTest` with `Testcontainers` PostgreSQL.
+- **Testcontainers** – Spins up a real PostgreSQL instance for integration tests (`SecurityIntegrationTest`, `TransferIntegrationTest`).
+- **Mockito** – Used where appropriate for unit isolation.
+- **Coverage** – Tests cover idempotency, optimistic‑locking races, ledger invariants, and security constraints.
+
+---
+
+## Tech Stack
+| Category | Technology |
+|---|---|
+| Language | Java 17 |
+| Framework | Spring Boot 4.1 |
+| Database | PostgreSQL |
+| ORM | Spring Data JPA / Hibernate |
+| Migrations | Flyway |
+| Security | Spring Security (JWT) |
+| Testing | JUnit 5, Mockito, Testcontainers |
+| Build | Maven |
+| Containerisation | Docker |
+| CI | GitHub Actions |
+
+---
+
+## Project Structure
+```
+src/main/java/com/prayas/payledger
+├── account/          # Account aggregate, repository, controller
+├── transfer/         # Transfer command, service, controller, ledger
+├── outbox/           # Outbox event entity & repository
+├── security/         # JWT configuration, method security
+├── webhook/          # HMAC‑signed webhook payloads
+├── common/           # API error handling utilities
+└── PaymentsApplication.java
+```
+
+---
+
+## Running Locally
+**Prerequisites**
+- Java 17 (adopted OpenJDK)
+- Maven 3.8+
+- Docker & Docker Compose (for PostgreSQL)
+
+**Start the database**
 ```bash
-docker compose up -d postgres
-mvn spring-boot:run
+docker compose -f compose.yaml up -d postgres
 ```
 
-Configuration is environment-driven:
-
+**Environment variables** (examples):
 ```bash
 export DB_URL=jdbc:postgresql://localhost:5432/payments
 export DB_USER=payments
 export DB_PASSWORD=payments
-export JWT_SECRET='replace-with-at-least-32-random-bytes'
-export WEBHOOK_SECRET='replace-with-a-separate-random-secret'
+export JWT_SECRET='replace-with-32‑byte‑random‑value'
+export WEBHOOK_SECRET='replace-with-another‑random‑secret'
 ```
 
-Generate a development JWT with scopes `accounts:write accounts:read transfers:write` (HS256, same secret as `JWT_SECRET`), then create two accounts and execute a transfer. The complete contract is available at [`/openapi.yaml`](src/main/resources/static/openapi.yaml).
-
-Example scopes claim for local tokens: `"scope": "accounts:write accounts:read transfers:write"`.
-
+**Run the application**
 ```bash
-curl -X POST http://localhost:8080/api/v1/transfers \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: order-2026-00042" \
-  -d '{"sourceAccountId":"<uuid>","destinationAccountId":"<uuid>","amount":125.50,"currency":"SDG"}'
+mvn spring-boot:run
 ```
+The API will be reachable at `http://localhost:8080`.
 
-Repeat the same request with the same client and key: it returns the original transfer rather than moving money twice.
-
-## Verify
-
+**Execute the test suite**
 ```bash
 mvn test
-mvn verify
 ```
+All integration tests use Testcontainers, so Docker must be running.
 
-Unit tests cover money invariants and signatures. PostgreSQL integration tests use Testcontainers to verify migrations, idempotency, balanced ledger entries, balance updates, and outbox creation against a real database engine.
+---
 
-## Repository map
+## Engineering Decisions
+- **Materialised balances + immutable ledger** – Fast reads via the `accounts` table while the ledger provides an audit‑proof of every movement.
+- **Optimistic locking** – Prevents lost updates without heavyweight pessimistic locks; suitable for high‑throughput payment services.
+- **Idempotency key** – Guarantees exactly‑once semantics for client‑side retries.
+- **Transactional outbox** – Decouples event publishing from the business transaction while preserving atomicity.
+- **Flyway migrations** – Immutable, version‑controlled schema evolution.
+- **JWT authentication** – Simple to run locally; in production you would swap for an external OIDC provider.
+- **Docker/Testcontainers** – Guarantees that developers and CI run against the same PostgreSQL version, catching migration or constraint issues early.
 
-```text
-src/main/java/dev/sudoasim/payments
-├── account/    versioned aggregate and account API
-├── transfer/   use case, ledger, idempotent transfer API
-├── outbox/     reliable event claim and publication boundary
-├── security/   JWT and scope policy
-├── webhook/    HMAC signature boundary
-└── common/     RFC 9457-style API errors
-```
-
-## Deliberate trade-offs
-
-- Balances are materialized for fast reads while the immutable ledger remains the audit record. A production reconciliation job should continuously compare both.
-- The included publisher logs the signed delivery boundary. A real deployment supplies an HTTP or broker adapter and records destination-level acknowledgements.
-- Currency conversion is intentionally excluded. Transfers require matching ISO-style currency codes so exchange-rate risk is not hidden in a demo.
-- The symmetric JWT decoder keeps local execution self-contained. Production should use an external issuer and asymmetric key rotation.
+---
 
 ## License
+Apache-2.0 © 2024‑2026 Prayas Dev.  The original reference implementation was authored by **Asim Abdalla** and is retained under the same license.
 
-Apache-2.0. Built by [Asim Abdalla](https://github.com/asim-altayb).
-
+---

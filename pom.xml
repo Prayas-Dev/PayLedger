@@ -8,11 +8,11 @@
     <version>4.1.0</version>
     <relativePath/>
   </parent>
-  <groupId>dev.sudoasim</groupId>
-  <artifactId>spring-payments-platform</artifactId>
-  <version>0.1.0</version>
-  <name>spring-payments-platform</name>
-  <description>Auditable double-entry payment reference platform</description>
+  <groupId>com.prayas</groupId>
+<artifactId>payledger</artifactId>
+<version>0.1.0</version>
+<name>PayLedger</name>
+<description>Auditable double-entry payment ledger and wallet service</description>
   <properties>
     <java.version>17</java.version>
     <testcontainers.version>2.0.3</testcontainers.version>
