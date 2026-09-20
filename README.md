@@ -37,24 +37,23 @@ The implementation is deliberately small enough to be inspected in full while st
 | Observability | Spring Boot Actuator + Micrometer Prometheus metrics |
 
 ---
-
 ## Architecture
+
 ```mermaid
 flowchart LR
-  Client[Client] -->|JWT + Idempotency‑Key| API[REST API]
-  API --> Service[Application / Service Layer]
-  Service --> DB[(PostgreSQL)]
-  DB --> Accounts[Versioned Accounts]
-  DB --> Ledger[Immutable Ledger]
-  DB --> Transfers[Transfer Records]
-  DB --> Outbox[Transactional Outbox]
-  Outbox --> Publisher[Outbox Publisher]
-  Publisher --> Webhook[Webhook (HMAC signed)]
-  API --> Metrics[Actuator & Micrometer]
-```
+    Client["Client"] -->|"JWT + Idempotency-Key"| API["REST API"]
+    API --> Service["Application / Service Layer"]
+    Service --> DB[("PostgreSQL")]
 
-The diagram shows the major components used by PayLedger.  All state changes occur inside a single database transaction, ensuring atomicity.
+    DB --> Accounts["Versioned Accounts"]
+    DB --> Ledger["Immutable Ledger"]
+    DB --> Transfers["Transfer Records"]
+    DB --> Outbox["Transactional Outbox"]
 
+    Outbox --> Publisher["Outbox Publisher"]
+    Publisher --> Webhook["Webhook - HMAC signed"]
+
+    API --> Metrics["Actuator & Micrometer"]
 ---
 
 ## Transfer Flow
